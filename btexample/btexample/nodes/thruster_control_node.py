@@ -40,7 +40,7 @@ class ThrusterControlNode(Node):
     def _do_tick(self):
         # This node simply hosts services — no real tick logic.
         self.ros_node.get_logger().info("[ThrusterControlNode] Ticked (no-op — services wait for external call)")
-        return NodeState.RUNNING  # stay alive so services stay up
+        return NodeState.SUCCEEDED  # stay alive so services stay up
 
     def _do_shutdown(self):
         if self.service_up is not None:

@@ -24,8 +24,11 @@ class DepthSensorNode(Node):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.latest_depth = None
+        self.pending_client = None
+        self.pending_future = None
+        self.pending_command = None
 
-        # ✅ Move subscription to constructor to make it persistent across resets
+        # Persistent subscription
         self.sub = self.ros_node.create_subscription(
             Float32,
             '/depth_data',
@@ -39,10 +42,34 @@ class DepthSensorNode(Node):
         self.ros_node.get_logger().info(f"[DepthSensorNode] Received depth: {self.latest_depth:.2f}")
 
     def _do_setup(self):
-        # ❌ No subscription logic here anymore
         return NodeState.IDLE
 
     def _do_tick(self):
+        # 1. Handle pending service call from previous tick
+        if self.pending_future is not None:
+            if self.pending_future.done():
+                result = self.pending_future.result()
+                if result is not None:
+                    self.outputs['status_message'] = (
+                        f"[DepthSensorNode] Service {self.pending_command} responded: {result.message}"
+                    )
+                    self.ros_node.get_logger().info(
+                        f"[DEBUG] Tick complete, status: RUNNING, msg: {self.outputs['status_message']}"
+                    )
+                else:
+                    self.outputs['status_message'] = (
+                        f"[DepthSensorNode] {self.pending_command} service failed"
+                    )
+                    return NodeState.FAILED
+
+                # Reset future for next tick
+                self.pending_client = None
+                self.pending_future = None
+                self.pending_command = None
+
+            return NodeState.RUNNING  # Wait for future to resolve
+
+        # 2. No future pending — check depth logic
         if self.latest_depth is None:
             self.outputs['status_message'] = "[DepthSensorNode] Waiting for depth data..."
             return NodeState.RUNNING
@@ -55,28 +82,26 @@ class DepthSensorNode(Node):
             self.outputs['status_message'] = "[DepthSensorNode] Depth OK. Awaiting next..."
             return NodeState.RUNNING
 
+        # 3. Depth out of range — initiate service call (non-blocking)
         command = 'thruster_down' if self.latest_depth < min_d else 'thruster_up'
         self.outputs['status_message'] = f"[DepthSensorNode] Depth out of range → calling {command}"
+        self.pending_command = command
 
-        client = self.ros_node.create_client(Trigger, command)
-        if not client.wait_for_service(timeout_sec=1.0):
+        self.pending_client = self.ros_node.create_client(Trigger, command)
+        if not self.pending_client.wait_for_service(timeout_sec=0.5):
             self.outputs['status_message'] = f"[DepthSensorNode] {command} service not available"
+            self.pending_client = None
+            self.pending_command = None
             return NodeState.FAILED
 
-        future = client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self.ros_node, future, timeout_sec=2.0)
-
-        if future.result() is not None:
-            self.outputs['status_message'] = f"[DepthSensorNode] Service {command} responded: {future.result().message}"
-            self.ros_node.get_logger().info(f"[DEBUG] Tick complete, status: RUNNING, msg: {self.outputs['status_message']}")
-        else:
-            self.outputs['status_message'] = f"[DepthSensorNode] {command} service failed"
-            return NodeState.FAILED
-
+        self.pending_future = self.pending_client.call_async(Trigger.Request())
         return NodeState.RUNNING
 
     def _do_reset(self):
         self.latest_depth = None
+        self.pending_future = None
+        self.pending_client = None
+        self.pending_command = None
         return NodeState.IDLE
 
     def _do_shutdown(self):
